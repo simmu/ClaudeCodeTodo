@@ -1,0 +1,297 @@
+name: Security Scans
+
+on:
+  push:
+    branches: [ main, 'agent/*' ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # Dependency vulnerability scanning
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: |
+          npm audit --audit-level high --json > audit-results.json || true
+          
+      - name: Upload audit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-results
+          path: audit-results.json
+
+      - name: Check for high/critical vulnerabilities
+        run: |
+          HIGH_VULNS=$(npm audit --audit-level high --json | jq '.metadata.vulnerabilities.high // 0')
+          CRITICAL_VULNS=$(npm audit --audit-level high --json | jq '.metadata.vulnerabilities.critical // 0')
+          
+          echo "High vulnerabilities: $HIGH_VULNS"
+          echo "Critical vulnerabilities: $CRITICAL_VULNS"
+          
+          if [ "$CRITICAL_VULNS" -gt 0 ]; then
+            echo "❌ Critical vulnerabilities found!"
+            exit 1
+          fi
+          
+          if [ "$HIGH_VULNS" -gt 5 ]; then
+            echo "⚠️ Too many high vulnerabilities found!"
+            exit 1
+          fi
+
+  # CodeQL static analysis
+  codeql-analysis:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'javascript', 'typescript' ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build for analysis
+        run: npm run build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
+
+  # Docker image security scanning
+  docker-security:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build frontend image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          tags: todo-frontend:security-scan
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build backend image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.backend
+          tags: todo-backend:security-scan
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner on frontend
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'todo-frontend:security-scan'
+          format: 'sarif'
+          output: 'frontend-trivy-results.sarif'
+
+      - name: Run Trivy vulnerability scanner on backend
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'todo-backend:security-scan'
+          format: 'sarif'
+          output: 'backend-trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'frontend-trivy-results.sarif'
+
+      - name: Upload Backend Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'backend-trivy-results.sarif'
+
+  # Secret scanning
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install TruffleHog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run TruffleHog scan
+        run: |
+          trufflehog git file://. --since-commit=$(git rev-list --max-parents=0 HEAD) --json > trufflehog-results.json || true
+
+      - name: Upload TruffleHog results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trufflehog-results
+          path: trufflehog-results.json
+
+      - name: Check for secrets
+        run: |
+          if [ -s trufflehog-results.json ] && [ "$(jq 'length' trufflehog-results.json)" -gt 0 ]; then
+            echo "❌ Potential secrets found!"
+            jq '.[].Raw' trufflehog-results.json
+            exit 1
+          else
+            echo "✅ No secrets detected"
+          fi
+
+  # License compliance
+  license-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install license-checker
+        run: npm install -g license-checker
+
+      - name: Check licenses
+        run: |
+          license-checker --summary --excludePrivatePackages > license-summary.txt
+          license-checker --json --excludePrivatePackages > license-details.json
+
+      - name: Upload license reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: license-reports
+          path: |
+            license-summary.txt
+            license-details.json
+
+      - name: Check for prohibited licenses
+        run: |
+          # List of prohibited licenses (adjust as needed)
+          PROHIBITED_LICENSES="GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0"
+          
+          if license-checker --onlyAllow "MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;Unlicense" --excludePrivatePackages; then
+            echo "✅ All licenses are compliant"
+          else
+            echo "❌ Some licenses may not be compliant"
+            exit 1
+          fi
+
+  # Security summary
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, codeql-analysis, secret-scan, license-check]
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate security summary
+        run: |
+          echo "# Security Scan Summary" > security-summary.md
+          echo "" >> security-summary.md
+          echo "**Scan Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> security-summary.md
+          echo "**Commit:** ${{ github.sha }}" >> security-summary.md
+          echo "" >> security-summary.md
+          
+          # Check job results
+          if [ "${{ needs.dependency-scan.result }}" == "success" ]; then
+            echo "✅ Dependency Scan: Passed" >> security-summary.md
+          else
+            echo "❌ Dependency Scan: Failed" >> security-summary.md
+          fi
+          
+          if [ "${{ needs.codeql-analysis.result }}" == "success" ]; then
+            echo "✅ CodeQL Analysis: Passed" >> security-summary.md
+          else
+            echo "❌ CodeQL Analysis: Failed" >> security-summary.md
+          fi
+          
+          if [ "${{ needs.secret-scan.result }}" == "success" ]; then
+            echo "✅ Secret Scan: Passed" >> security-summary.md
+          else
+            echo "❌ Secret Scan: Failed" >> security-summary.md
+          fi
+          
+          if [ "${{ needs.license-check.result }}" == "success" ]; then
+            echo "✅ License Check: Passed" >> security-summary.md
+          else
+            echo "❌ License Check: Failed" >> security-summary.md
+          fi
+
+      - name: Upload security summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-summary
+          path: security-summary.md
+
+      - name: Comment on PR with security summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('security-summary.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });

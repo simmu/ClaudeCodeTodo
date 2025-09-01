@@ -1,0 +1,94 @@
+# Backend Dockerfile for production
+FROM node:18-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache libc6-compat dumb-init
+
+WORKDIR /app
+
+# Create app user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nodejs
+
+# Install dependencies
+FROM base AS deps
+
+# Copy package files
+COPY package*.json ./
+COPY packages/backend/package*.json ./packages/backend/
+COPY packages/shared/package*.json ./packages/shared/
+
+# Install dependencies
+RUN npm ci --only=production --ignore-scripts && npm cache clean --force
+
+# Build shared package
+FROM base AS shared-builder
+COPY packages/shared ./packages/shared
+COPY package*.json ./
+COPY packages/shared/package*.json ./packages/shared/
+RUN npm ci --workspace=shared
+RUN npm run build --workspace=shared
+
+# Build the application
+FROM base AS builder
+
+# Copy dependencies
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=shared-builder /app/packages/shared/dist ./packages/shared/dist
+
+# Copy source code
+COPY package*.json ./
+COPY packages/backend ./packages/backend
+
+# Install dev dependencies and build
+RUN npm ci --workspace=backend
+RUN npm run build --workspace=backend
+
+# Generate Prisma client
+WORKDIR /app/packages/backend
+RUN npx prisma generate
+
+# Production image
+FROM base AS runner
+
+# Copy node_modules from deps stage (production only)
+COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
+
+# Copy shared package
+COPY --from=shared-builder --chown=nodejs:nodejs /app/packages/shared/dist ./packages/shared/dist
+
+# Copy built backend application
+COPY --from=builder --chown=nodejs:nodejs /app/packages/backend/dist ./packages/backend/dist
+COPY --from=builder --chown=nodejs:nodejs /app/packages/backend/node_modules/.prisma ./packages/backend/node_modules/.prisma
+COPY --from=builder --chown=nodejs:nodejs /app/packages/backend/prisma ./packages/backend/prisma
+
+# Copy package.json files
+COPY --chown=nodejs:nodejs package*.json ./
+COPY --chown=nodejs:nodejs packages/backend/package*.json ./packages/backend/
+
+# Create necessary directories and set permissions
+RUN mkdir -p /app/logs && chown nodejs:nodejs /app/logs
+RUN mkdir -p /app/uploads && chown nodejs:nodejs /app/uploads
+
+# Switch to non-root user
+USER nodejs
+
+# Set working directory
+WORKDIR /app/packages/backend
+
+# Environment variables
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+
+# Expose port
+EXPOSE 3000
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the application
+CMD ["node", "dist/server.js"]
