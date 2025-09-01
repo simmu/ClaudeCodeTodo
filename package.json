@@ -1,0 +1,54 @@
+{
+  "name": "todo-app",
+  "version": "1.0.0",
+  "description": "Offline-first todo application with multi-agent development workflow",
+  "private": true,
+  "workspaces": [
+    "packages/frontend",
+    "packages/backend",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:backend": "npm run dev --workspace=backend",
+    "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:unit": "jest --selectProjects frontend backend shared",
+    "test:integration": "jest --selectProjects integration",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "test:ci": "npm run test:coverage && npm run test:e2e",
+    "test:db:up": "docker-compose -f docker-compose.test.yml up -d --wait",
+    "test:db:down": "docker-compose -f docker-compose.test.yml down",
+    "test:db:reset": "npm run test:db:down && npm run test:db:up",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "db:setup": "npm run db:setup --workspace=backend",
+    "db:migrate": "npm run db:migrate --workspace=backend",
+    "postinstall": "npm run build --workspace=shared"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/jest": "^30.0.0",
+    "concurrently": "^8.2.2",
+    "fake-indexeddb": "^6.2.2",
+    "identity-obj-proxy": "^3.0.0",
+    "jest": "^30.1.2",
+    "jest-environment-jsdom": "^30.1.2",
+    "jsdom": "^26.1.0",
+    "ts-jest": "^29.4.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
