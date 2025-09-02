@@ -14,6 +14,7 @@
     "test:coverage": "jest --selectProjects frontend --coverage"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.1.12",
     "@tanstack/react-query": "^5.40.1",
     "dexie": "^4.0.8",
     "react": "^19.1.1",
